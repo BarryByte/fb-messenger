@@ -5,7 +5,7 @@ from app.schemas.message import MessageResponse
 from uuid import UUID
 
 class ConversationResponse(BaseModel):
-    id: int = Field(..., description="Unique ID of the conversation")
+    id: UUID = Field(..., description="Unique ID of the conversation")
     user1_id: int = Field(..., description="ID of the first user")
     user2_id: int = Field(..., description="ID of the second user")
     last_message_at: datetime = Field(..., description="Timestamp of the last message")
