@@ -2,6 +2,7 @@ from pydantic import BaseModel, Field
 from typing import List, Optional
 from datetime import datetime
 from app.schemas.message import MessageResponse
+from uuid import UUID
 
 class ConversationResponse(BaseModel):
     id: int = Field(..., description="Unique ID of the conversation")
@@ -21,4 +22,4 @@ class PaginatedConversationResponse(BaseModel):
     total: int = Field(..., description="Total number of conversations")
     page: int = Field(..., description="Current page number")
     limit: int = Field(..., description="Number of items per page")
-    data: List[ConversationResponse] = Field(..., description="List of conversations") 
+    data: List[ConversationResponse] = Field(..., description="List of conversations")
