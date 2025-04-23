@@ -1,20 +1,15 @@
 """
 Script to generate test data for the Messenger application.
-This script populates Cassandra based on the designed schema.
+This script is a skeleton for students to implement.
 """
 import os
 import uuid
 import logging
 import random
-from datetime import datetime, timedelta, timezone
-import time
+from datetime import datetime, timedelta
+from cassandra.cluster import Cluster
 
-from cassandra.cluster import Cluster, Session
-from cassandra.query import SimpleStatement, BatchStatement
-from cassandra import ConsistencyLevel
-from cassandra.util import uuid_from_time
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Cassandra connection settings
@@ -23,182 +18,124 @@ CASSANDRA_PORT = int(os.getenv("CASSANDRA_PORT", "9042"))
 CASSANDRA_KEYSPACE = os.getenv("CASSANDRA_KEYSPACE", "messenger")
 
 # Test data configuration
-NUM_USERS = 10
-NUM_CONVERSATIONS = 15
-MAX_MESSAGES_PER_CONVERSATION = 50
-MIN_MESSAGES_PER_CONVERSATION = 5
-
-# Consistency Level for Writes
-WRITE_CONSISTENCY = ConsistencyLevel.ONE # Use ONE for faster bulk loading, QUORUM for safer writes
+NUM_USERS = 10  # Number of users to create
+NUM_CONVERSATIONS = 15  # Number of conversations to create
+MAX_MESSAGES_PER_CONVERSATION = 50  # Maximum number of messages per conversation
 
 def connect_to_cassandra():
     """Connect to Cassandra cluster."""
-    logger.info(f"Connecting to Cassandra at {CASSANDRA_HOST}:{CASSANDRA_PORT}...")
-    cluster = None
-    for i in range(5): # Retry connection
-        try:
-            cluster = Cluster([CASSANDRA_HOST], port=CASSANDRA_PORT)
-            session = cluster.connect(CASSANDRA_KEYSPACE)
-            logger.info(f"Connected to Cassandra keyspace '{CASSANDRA_KEYSPACE}'!")
-            return cluster, session
-        except Exception as e:
-            logger.warning(f"Connection attempt {i+1} failed: {e}")
-            if cluster:
-                cluster.shutdown()
-            time.sleep(5)
-    logger.error("Failed to connect to Cassandra after multiple attempts.")
-    raise ConnectionError("Could not connect to Cassandra")
+    logger.info("Connecting to Cassandra...")
+    try:
+        cluster = Cluster([CASSANDRA_HOST])
+        session = cluster.connect(CASSANDRA_KEYSPACE)
+        logger.info("Connected to Cassandra!")
+        return cluster, session
+    except Exception as e:
+        logger.error(f"Failed to connect to Cassandra: {str(e)}")
+        raise
 
-
-def generate_test_data(session: Session):
+def get_next_id(session, counter_name):
     """
-    Generate test data in Cassandra based on the designed schema.
-    Uses direct inserts for efficiency.
+    Get the next sequential ID from the counters table.
+    """
+    session.execute(
+        """
+        UPDATE counters SET counter_value = counter_value + 1 WHERE counter_name = %s
+        """,
+        (counter_name,)
+    )
+    result = session.execute(
+        """
+        SELECT counter_value FROM counters WHERE counter_name = %s
+        """,
+        (counter_name,)
+    )
+    return result.one().counter_value
+
+def generate_test_data(session):
+    """
+    Generate test data in Cassandra.
+    
+    This function creates:
+    - Users (with IDs 1-NUM_USERS)
+    - Conversations between random pairs of users
+    - Messages in each conversation with realistic timestamps
     """
     logger.info("Generating test data...")
 
+    # Generate user IDs
     user_ids = list(range(1, NUM_USERS + 1))
-    created_conversations = set()
+    logger.info(f"Generated user IDs: {user_ids}")
 
-    insert_message_stmt = session.prepare("""
-        INSERT INTO messages_by_conversation
-        (conversation_id, message_time, message_id, sender_id, receiver_id, content)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """)
-    insert_user_convo_stmt = session.prepare("""
-        INSERT INTO conversations_by_user
-        (user_id, last_message_time, conversation_id, other_user_id, last_message_sender_id, last_message_content)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """)
-    insert_convo_lookup_stmt = session.prepare("""
-        INSERT INTO conversation_by_users (user_a_id, user_b_id, conversation_id) VALUES (?, ?, ?)
-    """)
+    # Generate conversations
+    conversations = []
+    for _ in range(NUM_CONVERSATIONS):
+        sender_id, receiver_id = random.sample(user_ids, 2)
+        conversation_id = get_next_id(session, "conversation_id")  # Get the next conversation ID
+        last_timestamp = datetime.utcnow()
+        last_message = f"Last message in conversation {conversation_id}"
+        
+        # Insert into user_conversations table
+        session.execute(
+            """
+            INSERT INTO user_conversations (sender_id, receiver_id, conversation_id, last_timestamp, last_message)
+            VALUES (%s, %s, %s, %s, %s)
+            """,
+            (sender_id, receiver_id, conversation_id, last_timestamp, last_message)
+        )
+        
+        # Insert into conversations table
+        session.execute(
+            """
+            INSERT INTO conversations (conversation_id, sender_id, receiver_id, last_timestamp)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (conversation_id, sender_id, receiver_id, last_timestamp)
+        )
+        
+        conversations.append((conversation_id, sender_id, receiver_id))
+        logger.info(f"Created conversation: {conversation_id} between {sender_id} and {receiver_id}")
 
-    conversations_generated = 0
-    attempts = 0
-    max_attempts = NUM_CONVERSATIONS * 5 # Limit attempts to avoid infinite loops if NUM_USERS is small
+    # Generate messages for each conversation
+    for conversation_id, sender_id, receiver_id in conversations:
+        num_messages = random.randint(1, MAX_MESSAGES_PER_CONVERSATION)
+        for _ in range(num_messages):
+            message_id = get_next_id(session, "message_id")  # Get the next message ID
+            timestamp = datetime.utcnow() - timedelta(seconds=random.randint(0, 3600))
+            content = f"Message {message_id} in conversation {conversation_id}"
+            
+            # Insert into messages table
+            session.execute(
+                """
+                INSERT INTO messages (conversation_id, timestamp, message_id, content, sender_id, receiver_id)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (conversation_id, timestamp, message_id, content, sender_id, receiver_id)
+            )
+        logger.info(f"Generated {num_messages} messages for conversation {conversation_id}")
 
-    while conversations_generated < NUM_CONVERSATIONS and attempts < max_attempts:
-        attempts += 1
-        user1_id = random.choice(user_ids)
-        user2_id = random.choice(user_ids)
-        if user1_id == user2_id:
-            continue
-
-        user_a_id = min(user1_id, user2_id)
-        user_b_id = max(user1_id, user2_id)
-        convo_pair = (user_a_id, user_b_id)
-
-        if convo_pair in created_conversations:
-            continue
-
-        conversation_id = uuid.uuid4()
-        try:
-            session.execute(insert_convo_lookup_stmt, (user_a_id, user_b_id, conversation_id), timeout=10.0)
-            created_conversations.add(convo_pair)
-            conversations_generated += 1
-            logger.info(f"Created conversation {conversation_id} between users {user_a_id} and {user_b_id}")
-
-        except Exception as e:
-            logger.warning(f"Could not insert conversation lookup for ({user_a_id}, {user_b_id}): {e}. Skipping.")
-            continue
-
-        num_messages = random.randint(MIN_MESSAGES_PER_CONVERSATION, MAX_MESSAGES_PER_CONVERSATION)
-        current_time = datetime.now(timezone.utc) - timedelta(days=random.randint(0, 30)) # Start sometime in the past month
-        last_message_time = None
-        last_message_content = ""
-        last_message_sender_id = None
-
-        batch = BatchStatement(consistency_level=WRITE_CONSISTENCY)
-        messages_in_batch = 0
-        MAX_BATCH_SIZE = 50 # Cassandra batch size recommendation
-
-        for i in range(num_messages):
-            sender = random.choice([user1_id, user2_id])
-            receiver = user2_id if sender == user1_id else user1_id
-            content = f"This is message {i+1}/{num_messages} in conversation {conversation_id} from {sender} to {receiver}."
-            current_time += timedelta(seconds=random.randint(1, 3600))
-            message_time = uuid_from_time(current_time)
-            message_id = uuid.uuid4() # Unique ID per message
-
-            batch.add(insert_message_stmt, (conversation_id, message_time, message_id, sender, receiver, content))
-            messages_in_batch += 1
-
-            last_message_time = message_time
-            last_message_content = content[:200] # Snippet
-            last_message_sender_id = sender
-
-            if messages_in_batch >= MAX_BATCH_SIZE:
-                 try:
-                     session.execute(batch, timeout=20.0)
-                     logger.debug(f"Executed batch of {messages_in_batch} messages for convo {conversation_id}")
-                     batch = BatchStatement(consistency_level=WRITE_CONSISTENCY) # Reset batch
-                     messages_in_batch = 0
-                 except Exception as e:
-                     logger.error(f"Error executing message batch for convo {conversation_id}: {e}")
-                     # Decide how to handle: continue, break, raise? Let's continue for now.
-                     batch = BatchStatement(consistency_level=WRITE_CONSISTENCY) # Reset batch
-                     messages_in_batch = 0
-
-
-        # Execute any remaining messages in the batch
-        if messages_in_batch > 0:
-            try:
-                session.execute(batch, timeout=20.0)
-                logger.debug(f"Executed final batch of {messages_in_batch} messages for convo {conversation_id}")
-            except Exception as e:
-                logger.error(f"Error executing final message batch for convo {conversation_id}: {e}")
-
-
-        if last_message_time and last_message_sender_id is not None:
-            batch_user_convo = BatchStatement(consistency_level=WRITE_CONSISTENCY)
-             # For user 1
-            batch_user_convo.add(insert_user_convo_stmt, (
-                user1_id, last_message_time, conversation_id, user2_id, last_message_sender_id, last_message_content
-            ))
-             # For user 2
-            batch_user_convo.add(insert_user_convo_stmt, (
-                user2_id, last_message_time, conversation_id, user1_id, last_message_sender_id, last_message_content
-            ))
-            try:
-                session.execute(batch_user_convo, timeout=10.0)
-                logger.debug(f"Updated user_conversations for users {user1_id} and {user2_id} for convo {conversation_id}")
-            except Exception as e:
-                 logger.error(f"Error updating user_conversations for convo {conversation_id}: {e}")
-        else:
-             logger.warning(f"No messages generated for conversation {conversation_id}, skipping user_conversations update.")
-
-
-    if conversations_generated < NUM_CONVERSATIONS:
-         logger.warning(f"Only generated {conversations_generated}/{NUM_CONVERSATIONS} conversations due to potential user pair exhaustion or errors.")
-    else:
-        logger.info(f"Successfully generated {conversations_generated} conversations with messages.")
-
+    logger.info(f"Generated {NUM_CONVERSATIONS} conversations with messages")
     logger.info(f"User IDs range from 1 to {NUM_USERS}")
     logger.info("Use these IDs for testing the API endpoints")
-
 
 def main():
     """Main function to generate test data."""
     cluster = None
-    session = None
-
+    
     try:
         # Connect to Cassandra
         cluster, session = connect_to_cassandra()
-
+        
         # Generate test data
         generate_test_data(session)
-
+        
         logger.info("Test data generation completed successfully!")
     except Exception as e:
-        logger.error(f"Error generating test data: {str(e)}", exc_info=True)
+        logger.error(f"Error generating test data: {str(e)}")
     finally:
-        if session:
-            session.shutdown()
         if cluster:
             cluster.shutdown()
             logger.info("Cassandra connection closed")
 
 if __name__ == "__main__":
-    main()
+    main() 
